@@ -60,56 +60,27 @@ def dispatcher(design):
         initialize=design["sec_reactor_nominal"]
     )  # [kWh/kgH2] Specific Energy Consumption of the electrolyzer
   
-    # Compressors
-    m.SEC_comp = pyo.Param(
-        initialize=design["comp_sec_nominal"])
-    
-    # Pumps
-    m.SEC_pump = pyo.Param(
-        initialize=design["pump_sec_nominal"])
     
     # Economic parameters
-    m.meoh_price = pyo.Param(
-         initialize=design["methanol_price"])
     m.scapex_reactor = pyo.Param(
          initialize=design["scapex_reactor"])
     m.scapex_elec = pyo.Param(
-         initialize=design["scapex_electrolyzer"])
-    m.elec_price = pyo.Param(
-        initialize=0.09)  # [€/kWh] electricity price
+         initialize=design["scapex_elec"])
+    
+    m.el_price = pyo.Param(
+        m.iIDX, initialize=design["Electricity_price_data"]["Grid_Price"].to_dict()
+    )  # [€/kWh]
+    m.meoh_price = pyo.Param(
+        initialize=design["meoh_price_data"]
+    )  # [€/kg] 
 
 
     # INITIALIZATION of VARIABLES
 
-    # Methanol's plant energy flows
-    m.P_comp = pyo.Var(
-        m.iIDX, domain=pyo.NonNegativeReals
-    )  # [kW] power supplied to compressor
-    m.P_pump = pyo.Var(
-        m.iIDX, domain=pyo.NonNegativeReals
-    )  # [kW] power supplied to pump
+    # Operational planning 
     m.P_reactor = pyo.Var(
         m.iIDX, domain=pyo.NonNegativeReals
     )  # [kW] power supplied to reactor
-  
-
-    m.reactor_size = pyo.Var(
-     domain=pyo.NonNegativeReals
-    )  # [kW] maximum flowrate of methanol from reactor
-    m.chi_reactor = pyo.Var(
-        m.iIDX, domain=pyo.Binary
-    )  # [-] binary variable for the reactor operation
-    m.m_meoh = pyo.Var(
-     m.iIDX, domain=pyo.NonNegativeReals
-    )  # [kg/h] methanol mass flow rate from reactor
-
-    # Electrolyzer energy flows
-    m.elec_size = pyo.Var(
-        domain=pyo.NonNegativeReals
-    ) # [kW] maximum allowed power to electrolyzer
-    m.P_PV_to_elec = pyo.Var(
-        m.iIDX, domain=pyo.NonNegativeReals
-    )  # [kW] power from the PV to the electrolyzer
     m.P_elec = pyo.Var(
         m.iIDX, domain=pyo.NonNegativeReals
     )  # [kW] power supplied to electrolyzer
@@ -117,25 +88,38 @@ def dispatcher(design):
         m.iIDX, domain=pyo.NonNegativeReals
     )  # [kW] power curtailed from the PV
 
+    m.m_elec = pyo.Var(
+        m.iIDX, domain=pyo.NonNegativeReals
+    )  # [kg/h] hydrogen mass flow rate from electrolyzer
+    m.m_meoh = pyo.Var(
+        m.iIDX, domain=pyo.NonNegativeReals
+    )  # [kg/h] methanol mass flow rate from reactor
+
+    
+    # Sizing variables
+    m.reactor_size = pyo.Var(
+     domain=pyo.NonNegativeReals
+    )  # [kW] maximum flowrate of methanol from reactor
+    m.chi_reactor = pyo.Var(
+        m.iIDX, domain=pyo.Binary
+    )  # [-] binary variable for the reactor operation
+
+    m.elec_size = pyo.Var(
+        domain=pyo.NonNegativeReals
+    ) # [kW] maximum allowed power to electrolyzer
     m.chi_elec = pyo.Var(
         m.iIDX, domain=pyo.Binary
     )  # [-] binary variable for the electrolyzer operation
 
-    m.m_elec = pyo.Var(
-        m.iIDX, domain=pyo.NonNegativeReals
-    )  # [kg/h] hydrogen mass flow rate from electrolyzer
-
     
-    # DEFINITION of the optimization problem
+    # DEFINITION OF OPTIMIZATION PROBLEM ------------------------------------
 
-    # definition of the objective function
     def obj_funct(m):
-        capex = m.scapex_elec * m.elec_size + m.scapex_reactor * m.reactor_size
-        opex = sum((-m.elec_price*(m.P_elec[i] + m.P_reactor[i]) for i in m.iIDX))
-        return capex + opex
-        
+        capex = - m.scapex_elec * m.elec_size - m.scapex_reactor * m.reactor_size
+        revenues = sum((m.meoh_price * m.m_meoh[i]) for i in m.iIDX)
+        return capex + revenues
 
-    m.obj = pyo.Objective(rule=obj_funct, sense=pyo.minimize)
+    m.obj = pyo.Objective(rule=obj_funct, sense=pyo.maximize)
 
     #DEFINITION OF CONSTRAINTS ----------------------------------------------
 
@@ -145,50 +129,41 @@ def dispatcher(design):
     
     m.cstr_mass_equilibrium = pyo.Constraint( m.iIDX,rule=f_mass_equilibrium)
     
-    def f_reactor_max(m,i):
-        return m.m_meoh[i] <= m.reactor_max * m.reactor_size
-
-    m.cstr_reactor_max = pyo.Constraint(m.iIDX,rule=f_reactor_max)
-
-    def f_reactor_min(m,i):
-        return m.m_meoh[i] >= m.reactor_min * m.reactor_size
-
-    m.cstr_reactor_min = pyo.Constraint( m.iIDX,rule=f_reactor_min)
-
     def f_SEC_reactor(m, i):
         return m.m_meoh[i] == m.P_reactor[i] / m.SEC_reactor
 
-    m.cstr_SEC = pyo.Constraint(m.iIDX, rule=f_SEC_reactor)
-
-    def f_meoh_demand(m, i):
-        return m.m_meoh[i] == 1000
-    
-    m.cstr_meoh_demand = pyo.Constraint(m.iIDX, rule=f_meoh_demand)
-
-    def f_power_equilibrium(m, i):
-        return m.P_PV_to_elec[i]  == m.P_elec[i]
-
-    m.cstr_power_equilibrium = pyo.Constraint(m.iIDX, rule=f_power_equilibrium)
-
-    def f_power_curtailment(m, i):
-        return m.P_PV_to_elec[i] + m.P_curt[i] + m.P_reactor[i] == m.P_PV[i]
-
-    m.cstr_power_curtailment = pyo.Constraint(m.iIDX, rule=f_power_curtailment)
-
-    def f_electrolyzer_max(m, i):
-        return m.P_elec[i] <= m.P_elec_max * m.elec_size
-
-    m.cstr_electrolyzer_max = pyo.Constraint(m.iIDX, rule=f_electrolyzer_max)
-
-    def f_electrolyzer_min(m, i):
-        return m.P_elec[i] >= m.P_elec_min * m.elec_size
-
-    m.cstr_electrolyzer_min = pyo.Constraint(m.iIDX, rule=f_electrolyzer_min)
+    m.cstr_SEC_reactor = pyo.Constraint(m.iIDX, rule=f_SEC_reactor)
 
     def f_SEC_elec(m, i):
         return m.m_elec[i] == m.P_elec[i] / m.SEC_elec
 
-    m.cstr_SEC = pyo.Constraint(m.iIDX, rule=f_SEC_elec)
+    m.cstr_SEC_elec = pyo.Constraint(m.iIDX, rule=f_SEC_elec)
+
+    def f_power_equilibrium(m, i):
+        return m.P_elec[i] + m.P_curt[i] + m.P_reactor[i] == m.P_PV[i]
+
+    m.cstr_power_equilibrium = pyo.Constraint(m.iIDX, rule=f_power_equilibrium)
+
+
+    def f_reactor_max(m,i):
+        return m.m_meoh[i] <= m.chi_reactor[i] * m.reactor_max * m.reactor_size
+
+    m.cstr_reactor_max = pyo.Constraint(m.iIDX,rule=f_reactor_max)
+
+    def f_reactor_min(m,i):
+        return m.m_meoh[i] >= m.chi_reactor[i] * m.reactor_min * m.reactor_size
+
+    m.cstr_reactor_min = pyo.Constraint( m.iIDX,rule=f_reactor_min)
+
+    def f_electrolyzer_max(m, i):
+        return m.P_elec[i] <= m.chi_elec[i] * m.P_elec_max * m.elec_size
+
+    m.cstr_electrolyzer_max = pyo.Constraint(m.iIDX, rule=f_electrolyzer_max)
+
+    def f_electrolyzer_min(m, i):
+        return m.P_elec[i] >= m.chi_elec[i] * m.P_elec_min * m.elec_size
+
+    m.cstr_electrolyzer_min = pyo.Constraint(m.iIDX, rule=f_electrolyzer_min)
 
     # selection of the optimization solver (minding that it is suited for the kind of problem)
     opt = pyo.SolverFactory("gurobi")
@@ -210,32 +185,34 @@ def dispatcher(design):
     data_time = np.array([i for i in m.iIDX])
 
     # Storing the data in arrays that can later be exported (maybe in a dataframe) and/or be displayed
-    P_reactor = np.array([pyo.value(m.P_reactor[i]) for i in m.iIDX])
-    methanol_reactor = np.array([pyo.value(m.m_meoh[i]) for i in m.iIDX])
-    P_elec = np.array([pyo.value(m.P_elec[i]) for i in m.iIDX])
-    P_PV_to_elec = np.array([pyo.value(m.P_PV_to_elec[i]) for i in m.iIDX])
-    P_PV = np.array([pyo.value(m.P_PV[i]) for i in m.iIDX])
-    P_curt = np.array([pyo.value(m.P_curt[i]) for i in m.iIDX])
-    #chi_elec = np.array([pyo.value(m.chi_elec[i]) for i in m.iIDX])
-    m_elec = np.array([pyo.value(m.m_elec[i]) for i in m.iIDX])
+    results = {}
+    results["reactor_sz"] = np.array([pyo.value(m.reactor_size)])
+    results["elec_sz"] = np.array([pyo.value(m.elec_size)])
+
+    results["P_reactor"] = np.array([pyo.value(m.P_reactor[i]) for i in m.iIDX])
+    results["P_elec"] = np.array([pyo.value(m.P_elec[i]) for i in m.iIDX])
+    results["P_PV"] = np.array([pyo.value(m.P_PV[i]) for i in m.iIDX])
+    results["P_curt"] = np.array([pyo.value(m.P_curt[i]) for i in m.iIDX])
+
+    results["m_elec"] = np.array([pyo.value(m.m_elec[i]) for i in m.iIDX])
+    results["m_meoh"] = np.array([pyo.value(m.m_meoh[i]) for i in m.iIDX])
 
 
-    return data_time, m, methanol_reactor, P_reactor, P_elec, P_PV, P_PV_to_elec,P_curt, m_elec # return the other variables as well
+    return (data_time, m, results) # return the other variables as well
 
 from design import *
 
 
 # %% I run the simulation
 time_horizon = 8760 # how should we define this parameter? Years, Hours?
-(data_time, m, methanol_reactor, P_reactor, P_elec, P_PV,
-  P_PV_to_elec, P_curt, m_elec) = dispatcher(design)
+(data_time, m, results) = dispatcher(design)
 # %%
 # First subplot: Power output comparison
 plt.subplot(2, 1, 1)  # (rows, columns, index)
-plt.plot(data_time[:100], P_reactor[:100], label='P_reactor', color='blue')
-plt.plot(data_time[:100], P_elec[:100], label='P_elec', color='green')
-plt.plot(data_time[:100], P_curt[:100], label='P_curt', color='red')
-plt.plot(data_time[:100], P_PV[:100], label='P_PV', color='black')
+plt.plot(data_time[:100], results["P_reactor"][:100], label='P_reactor', color='blue')
+plt.plot(data_time[:100], results["P_elec"][:100], label='P_elec', color='green')
+plt.plot(data_time[:100], results["P_curt"][:100], label='P_curt', color='red')
+plt.plot(data_time[:100], results["P_PV"][:100], label='P_PV', color='black')
 
 # Adding labels and title for the first subplot
 plt.xlabel('Time')
@@ -245,8 +222,8 @@ plt.legend()
 
 # Second subplot: Methanol and Hydrogen mass
 plt.subplot(2, 1, 2)  # Second plot
-plt.plot(data_time[:100], methanol_reactor[:100], label='Methanol Produced (m_meoh)', color='purple')
-plt.plot(data_time[:100], m_elec[:100], label='Hydrogen Consumed (m_elec)', color='orange')
+plt.plot(data_time[:100], results["m_meoh"][:100], label='Methanol Produced (m_meoh)', color='purple')
+plt.plot(data_time[:100], results["m_elec"][:100], label='Hydrogen Consumed (m_elec)', color='orange')
 
 # Adding labels and title for the second subplot
 plt.xlabel('Time')
@@ -257,5 +234,6 @@ plt.legend()
 # Adjust layout for better spacing
 plt.tight_layout()
 
-#plt.plot(data_time[:100],methanol_reactor[0:100])
+print(results["reactor_sz"])
+print(results["elec_sz"])
 # %%
